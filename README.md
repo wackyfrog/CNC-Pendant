@@ -70,6 +70,6 @@ It can also be compiled in the Arduino framework (https://www.arduino.cc/), in o
  1) Please rename src/CNC-pendant.cpp to src/CNC-pendant.ino
  2) Setup Arduino to work with Arduino Pro Micro properly, please refer to documentation here: https://www.sparkfun.com/products/12640 (especially, 'Documents' section!)
  3) Don't forget to select the proper board in Arduino UI before flashing it! 5v/16MHz!
- 3) Sometimes you need to reset the board in order to flash it, you can use tweezers to connect RST to GND twice (this magic is from the 'Firmware Note' document, see above). 
+ 3) Sometimes you need to resetState the board in order to flash it, you can use tweezers to connect RST to GND twice (this magic is from the 'Firmware Note' document, see above). 
  
 Maybe it makes sense to replace the Arduino Pro Micro with ESP8266/ESP32 just because it is cheaper, what do you think?

@@ -1,7 +1,7 @@
-#include "Arduino.h"
-
 // CNC pendant interface to Duet
 // D Crocker, started 2020-05-04
+
+// Oleksandr Degtiar <adegtiar@gmail.com>
 
 /* This Arduino sketch can be run on either Arduino Nano or Arduino Pro Micro. 
  * It should alo work on an Arduino Uno (using the same wiring scheme as for the Nano) or Arduino Leonardo (using the same wiring scheme as for the Pro Micro).
@@ -91,231 +91,380 @@ On the Arduino Nano is necessary to replace the 1K resistor between the USB inte
 On Arduino Nano clones with CH340G chip, it is also necessary to remove the RxD LED or its series resistor.
 
 */
-
-// Configuration constants
-const int PinA = 2;
-const int PinB = 3;
-const int PinX = 4;
-const int PinY = 5;
-const int PinZ = 6;
-const int PinU = 7;
-const int PinEnable = 14;
-const int PinPause = 15;
-const int PinStop = A0;
-
-#if defined(__AVR_ATmega32U4__)     // Arduino Micro, Pro Micro or Leonardo
-const int PinTimes1 = A1;
-const int PinTimes10 = A2;
-const int PinTimes100 = A3;
-const int PinLed = 10;
-#endif
-
 #if defined(__AVR_ATmega328P__)     // Arduino Nano or Uno
-const int PinTimes1 = 10;
-const int PinTimes10 = 11;
-const int PinTimes100 = 12;
-const int PinLed = 13;
 #endif
 
-
-const unsigned long BaudRate = 57600;
-const int PulsesPerClick = 4;
-const unsigned long MinCommandInterval = 20;
-
-// Table of commands we send, one entry for each axis
-const char* const MoveCommands[] =
-{
-  "G91 G0 F6000 X",     // X axis
-  "G91 G0 F6000 Y",     // Y axis
-  "G91 G0 F600 Z",      // Z axis
-  "G91 G0 F6000 U"
-};
-
-#include "RotaryEncoder.h"
+#include <Arduino.h>
+#include "Config.h"
+#include "Pendant.h"
 #include "GCodeSerial.h"
 #include "PassThrough.h"
+#include "Led.h"
+#include "LedRGB.h"
 
-RotaryEncoder encoder(PinA, PinB, PulsesPerClick);
-PassThrough passThrough;
+typedef enum {
+    INIT,
+    IDLE,
+    IDLE_MOVEMENT,
+    MOVEMENT,
+    MOVEMENT_WCS,
+    ACKNOWLEDGE,
+    ACKNOWLEDGE_CONFIRM,
+    ACKNOWLEDGE_CANCEL,
+    TIMEOUT_AFTER_COMMAND
+} State;
 
-int serialBufferSize;
-int distanceMultiplier;
-int axis;
-uint32_t whenLastCommandSent = 0;
+LedRGB stateLed(PIN_ACTIVITY_LED);
 
-const int axisPins[] = {PinX, PinY, PinZ, PinU};
-const int feedAmountPins[] = { PinTimes1, PinTimes10, PinTimes100 };
+LedRGB serialActivityLed(PIN_ACTIVITY_LED);
 
-#if defined(__AVR_ATmega32U4__)     // Arduino Leonardo or Pro Micro
-# define UartSerial   Serial1
-#elif defined(__AVR_ATmega328P__)   // Arduino Uno or Nano
-# define UartSerial   Serial
-#endif
+Led buttonLed(PIN_BUTTON_LED);
+
+State state = INIT;
+
+Pendant pendant;
 
 GCodeSerial output(UartSerial);
 
-void bailOut();
+PassThrough passThrough(UartSerial, output);
 
-void setup()
-{
-  pinMode(PinA, INPUT_PULLUP);
-  pinMode(PinB, INPUT_PULLUP);
-  pinMode(PinX, INPUT_PULLUP);
-  pinMode(PinY, INPUT_PULLUP);
-  pinMode(PinZ, INPUT_PULLUP);
-  pinMode(PinU, INPUT_PULLUP);
-  pinMode(PinTimes1, INPUT_PULLUP);
-  pinMode(PinTimes10, INPUT_PULLUP);
-  pinMode(PinTimes100, INPUT_PULLUP);
-  pinMode(PinEnable, INPUT_PULLUP);
-  pinMode(PinPause, INPUT_PULLUP);
-  pinMode(PinStop, INPUT_PULLUP);
-  pinMode(PinLed, OUTPUT);
 
-  output.begin(BaudRate);
+int axisWhenButtonPressed = Pendant::Axis::OFF;
 
-  serialBufferSize = output.availableForWrite();
+int acknowelegementResult = 0;
 
-#if defined(__AVR_ATmega32U4__)     // Arduino Leonardo or Pro Micro
-  TX_RX_LED_INIT;
-#endif
+int previousAxis = Pendant::Axis::OFF;
+int previousXSwitch = Pendant::XSwitch::UNDEFINED;
+
+uint32_t stateLastChangeTime = 0;
+
+void startupBlink() {
+    buttonLed.on();
+    delay(500);
+    buttonLed.off();
+
+    stateLed.setColorHSV(HUE_RED, SATURATION_MAX, LED_MAX_VAL);
+    stateLed.on();
+    delay(200);
+
+    stateLed.setColorHSV(HUE_GREEN, SATURATION_MAX, LED_MAX_VAL);
+    stateLed.on();
+    delay(200);
+
+    stateLed.setColorHSV(HUE_BLUE, SATURATION_MAX, LED_MAX_VAL);
+    stateLed.on();
+    delay(200);
+    stateLed.off();
 }
 
-// Check for received data from PanelDue, store it in the pass through buffer, and send it if we have a complete command
-void checkPassThrough()
-{
-  unsigned int commandLength = passThrough.Check(UartSerial);
-  if (commandLength != 0 && UartSerial.availableForWrite() == serialBufferSize)
-  {
-    output.write(passThrough.GetCommand(), commandLength);
-  }
+void setState(State newState) {
+    if (newState == state) {
+        return;
+    }
+
+    switch (newState) {
+        case IDLE:
+//            Serial1.println(F("[MODE][IDLE]"));
+            buttonLed.setMode(Led::On);
+            stateLed.off();
+            break;
+
+        case IDLE_MOVEMENT:
+//            Serial1.println(F("[MODE][IDLE_MOVEMENT]"));
+            buttonLed.setMode(Led::Blink1);
+            stateLed.off();
+            break;
+
+        case MOVEMENT:
+//            Serial1.println(F("[MODE][MOVEMENT]"));
+            buttonLed.setMode(Led::On);
+            previousAxis = Pendant::Axis::OFF;
+            break;
+
+        case MOVEMENT_WCS:
+//            Serial1.println(F("[MODE][MOVEMENT_WCS]"));
+            buttonLed.setMode(Led::On);
+            break;
+
+        case ACKNOWLEDGE:
+            stateLed.setColorWhite(LED_MAX_VAL);
+            buttonLed.on();
+            stateLed.on();
+            acknowelegementResult = 0;
+            break;
+
+        case ACKNOWLEDGE_CONFIRM:
+            stateLed.setColorHSV(HUE_GREEN, SATURATION_MAX, LED_MAX_VAL);
+            stateLed.setMode(Led::FastBlink);
+            output.print(CommandConfirm);
+            output.println();
+            break;
+
+        case ACKNOWLEDGE_CANCEL:
+            stateLed.setColorHSV(HUE_RED, SATURATION_MAX, LED_MAX_VAL);
+            stateLed.setMode(Led::FastBlink);
+            output.print(CommandCancel);
+            output.println();
+            break;
+
+        case TIMEOUT_AFTER_COMMAND:
+            break;
+
+        default:
+            break;
+    }
+
+    state = newState;
+    stateLastChangeTime = millis();
 }
 
-void discardPassThrough()
-{
-    passThrough.Check(UartSerial);
-    passThrough.GetCommand();
+bool onButtonPress() {
+    axisWhenButtonPressed = pendant.getAxis();
+    return true;
 }
 
-void bailOut()
-{
-    digitalWrite(PinLed, LOW);
-    // read all from pass through and discard
-    discardPassThrough();
-    encoder.getChange();
+bool onButtonRelease(const uint32_t time) {
+//    output.println(F("onButtonRelease"));
+    switch (state) {
+        case IDLE:
+            if (axisWhenButtonPressed == Pendant::Axis::OFF
+                /*&& pendant.getXSwitch() == Pendant::XSwitch::X100*/
+                && pendant.getAxis() != Pendant::Axis::OFF) {
+                output.print(WCSResetCommands[pendant.getAxis() - 1]);
+                output.println();
+
+                stateLed.setColorHSV(HUE_AZURE, SATURATION_MAX, LED_MAX_VAL);
+                stateLed.setMode(Led::FastBlink);
+                setState(TIMEOUT_AFTER_COMMAND);
+                break;
+            }
+
+            if (pendant.getAxis() == Pendant::Axis::OFF && time < BUTTON_SHORT_PRESS_MAX_TIME) {
+                setState(ACKNOWLEDGE);
+            }
+            break;
+
+        case IDLE_MOVEMENT:
+            if (axisWhenButtonPressed != pendant.getAxis()/* || pendant.getXSwitch() != Pendant::XSwitch::X100*/) {
+                break;
+            }
+            setState(MOVEMENT);
+            break;
+
+        case MOVEMENT:
+            setState(IDLE_MOVEMENT);
+            break;
+
+        case ACKNOWLEDGE:
+            if (time < BUTTON_SHORT_PRESS_MAX_TIME) {
+                setState(IDLE);
+            }
+            break;
+
+        default:
+            break;
+    }
+    return true;
 }
 
-void loop()
-{
-  // 0. Poll the encoder. Ideally we would do this in the tick ISR, but after all these years the Arduino core STILL doesn't let us hook it.
-  // We could possibly use interrupts instead, but if the encoder suffers from contact bounce then that isn't a good idea.
-  // In practice this loop executes fast enough that polling it here works well enough
-  encoder.poll();
-
-  // 1. Check for emergency stop (Normally Open, replace to HIGHs if using NC)
-  if (digitalRead(PinStop) == LOW)
-  {
-    // Send emergency stop command every 2 seconds
-    do
-    {
-      output.write("M112 ;" "\xF0" "\x0F" "\n");
-      digitalWrite(PinLed, LOW);
-      uint16_t now = (uint16_t)millis();
-      while (digitalRead(PinStop) == LOW && (uint16_t)millis() - now < 2000)
-      {
-        checkPassThrough();
-      }
-      encoder.getChange();      // ignore any movement
-    } while (digitalRead(PinStop) == LOW);
-
-    output.write("M999\n");
-  }
-
-  // check if enabled
-  if (digitalRead(PinEnable) == LOW)
-  {
-      bailOut();
-      return;
-  }
-
-  // 2. Check for pause/resume  (Normally Open, replace to HIGHs if using NC)
-  if (digitalRead(PinPause) == LOW) {
-    digitalWrite(PinLed, LOW);
-    uint16_t now = (uint16_t) millis();
-    while (digitalRead(PinStop) == LOW && (uint16_t) millis() - now < 40) {
-        checkPassThrough();
-        encoder.getChange();      // ignore any movement
-    }
-
-    if (digitalRead(PinPause) == LOW) {
-      //output.write("M98 P\"pause_resume.g\"\n");
-    }
-  }
-
-  // 2. Poll the feed amount switch
-  distanceMultiplier = 0;
-  int localDistanceMultiplier = 1;
-  for (int pin : feedAmountPins)
-  {
-    if (digitalRead(pin) == LOW)
-    {
-      distanceMultiplier = localDistanceMultiplier;
-      break;
-    }
-    localDistanceMultiplier *= 10;
-  }
-
-  // 3. Poll the axis selector switch
-  axis = -1;
-  int localAxis = 0;
-  for (int pin : axisPins)
-  {
-    if (digitalRead(pin) == LOW)
-    {
-      axis = localAxis;
-      break;
-    }
-    ++localAxis;
-  }
-  // 5th position is selected - for now let it turn off everything
-  if (axis == -1) {
-      bailOut();
-      return;
-  }
-
-  digitalWrite(PinLed, HIGH);
-
-    // 5. If the serial output buffer is empty, send a G0 command for the accumulated encoder motion.
-  if (output.availableForWrite() == serialBufferSize)
-  {
-#if defined(__AVR_ATmega32U4__)     // Arduino Micro, Pro Micro or Leonardo
-    TXLED1;                         // turn off transmit LED
-#endif
+bool processMovement() {
+    static uint32_t whenLastCommandSent = 0;
     const uint32_t now = millis();
-    if (now - whenLastCommandSent >= MinCommandInterval)
-    {
-      int distance = encoder.getChange() * distanceMultiplier;
-      if (axis >= 0 && distance != 0)
-      {
-#if defined(__AVR_ATmega32U4__)     // Arduino Micro, Pro Micro or Leonardo
-        TXLED0;                     // turn on transmit LED
-#endif
-        whenLastCommandSent = now;
-        output.write(MoveCommands[axis]);
-        if (distance < 0)
-        {
-          output.write('-');
-          distance = -distance;
-        }
-        output.print(distance/10);
-        output.write('.');
-        output.print(distance % 10);
-        output.write('\n');
-      }
-    }
-  }
 
-  checkPassThrough();
+    if (pendant.getAxis() == Pendant::Axis::OFF || pendant.getFeedFactor() == 0) {
+        pendant.readEncoderValue();
+        return false;
+    }
+
+    if (now < whenLastCommandSent + MOVEMENT_SEND_INTERVAL) {
+        return false;
+    }
+
+    if (!output.isTxBufferEmpty()) {
+        return false;
+    }
+
+    int encoderValue = pendant.readEncoderValue();
+    if (encoderValue == 0) {
+        return false;
+    }
+
+    whenLastCommandSent = now;
+    output.write(MoveCommands[pendant.getAxis() - 1]);
+    output.print((float) encoderValue / (float) pendant.getFeedFactor(), 2);
+    output.println();
+    return true;
+}
+
+
+void processAcknowledgement() {
+    const int ackThreshold = 30;
+    int value = pendant.readEncoderValue();
+    if (value == 0) {
+        return;
+    }
+
+
+    acknowelegementResult += value;
+    if (acknowelegementResult > ackThreshold) {
+        setState(ACKNOWLEDGE_CONFIRM);
+        return;
+
+    } else if (acknowelegementResult < -ackThreshold) {
+        setState(ACKNOWLEDGE_CANCEL);
+        return;
+    }
+
+    int hue = HUE_YELLOW + acknowelegementResult * 2;
+    if (hue > HUE_GREEN) {
+        hue = HUE_GREEN;
+    } else if (hue < HUE_RED) {
+        hue = HUE_RED;
+    } else if (stateLed.getMode() != Led::On) {
+        stateLed.on();
+    }
+
+    stateLed.setColorHSV(hue, min(abs(acknowelegementResult) * 8, 100), LED_MAX_VAL);
+    stateLed.update();
+    stateLastChangeTime = millis();
+}
+
+void setup() {
+    startupBlink();
+#if defined(__AVR_ATmega32U4__)     // Arduino Leonardo or Pro Micro
+    TX_RX_LED_INIT;
+    TXLED0;
+    RXLED0;
+#endif
+
+    output.begin(BAUD_RATE);
+    output.println(F("echo ****** " VERSION " has been started ***** "));
+
+    serialActivityLed.setColorWhite(LED_MAX_VAL);
+    output.setActivityCallback([](void) {
+        if (serialActivityLed.isOff() && millis() - serialActivityLed.getLastUpdateTime() > 50) {
+            serialActivityLed.on(50);
+        }
+    });
+
+    pendant.onButtonPress = onButtonPress;
+    pendant.onButtonRelease = onButtonRelease;
+}
+
+void onButtonPressing() {
+    switch (state) {
+        case MOVEMENT:
+            if (pendant.readEncoderValue() != 0
+                || pendant.getAxis() != previousAxis
+                || pendant.getXSwitch() != previousXSwitch) {
+                setState(IDLE);
+                return;
+            }
+            if (pendant.getButtonPressingTime() < 2000) {
+                break;
+            }
+
+            output.print(WCSSetCommands[axisWhenButtonPressed - 1]);
+            output.println();
+
+            stateLed.setColorHSV(axisColor[pendant.getAxis() - 1], SATURATION_MAX, LED_MAX_VAL);
+            stateLed.setMode(Led::FastBlink);
+            setState(TIMEOUT_AFTER_COMMAND);
+            break;
+
+        default:
+            break;
+    }
+}
+
+void loop() {
+    pendant.poll();
+
+    buttonLed.tick();
+    if (serialActivityLed.isOff() || stateLed.isDynamic() || state == ACKNOWLEDGE) {
+        stateLed.tick();
+
+    } else {
+        serialActivityLed.tick();
+    }
+
+    uint32_t now = millis();
+    if (pendant.isButtonPressed()) {
+        onButtonPressing();
+        pendant.readEncoderValue();
+        passThrough.discard();
+        return;
+    }
+
+    if (pendant.getAxis() != previousAxis && pendant.getAxis() == Pendant::Axis::OFF) {
+        setState(IDLE);
+    }
+
+    switch (state) {
+        case INIT:
+            setState(IDLE);
+            return;
+
+        case IDLE:
+            if (pendant.getAxis() != Pendant::Axis::OFF) {
+                setState(IDLE_MOVEMENT);
+            }
+            pendant.readEncoderValue();
+            break;
+
+        case IDLE_MOVEMENT:
+            pendant.readEncoderValue();
+            break;
+
+        case MOVEMENT:
+            if (now - stateLastChangeTime > MOVEMENT_IDLE_TIME) {
+                setState(IDLE_MOVEMENT);
+                break;
+            }
+            if ((pendant.getAxis() != previousAxis && pendant.getAxis() != Pendant::Axis::OFF)
+                || (pendant.getXSwitch() != previousXSwitch)) {
+                stateLed.setColorHSV(axisColor[pendant.getAxis() - 1], SATURATION_MAX, LED_MAX_VAL);
+                stateLed.on();
+            }
+            if (processMovement()) {
+                stateLastChangeTime = now;
+            }
+            break;
+
+        case MOVEMENT_WCS:
+            if (pendant.getAxis() != axisWhenButtonPressed) {
+                setState(IDLE_MOVEMENT);
+            }
+            break;
+
+        case ACKNOWLEDGE:
+            if (now - stateLastChangeTime > ACKNOWLEDGE_IDLE_TIME || pendant.getAxis() != Pendant::Axis::OFF) {
+                setState(IDLE);
+                break;
+            }
+
+            processAcknowledgement();
+            break;
+
+        case ACKNOWLEDGE_CONFIRM:
+            // fallthrough
+        case ACKNOWLEDGE_CANCEL:
+            // fallthrough
+        case TIMEOUT_AFTER_COMMAND:
+            buttonLed.off();
+            pendant.readEncoderValue();
+            if (now - stateLastChangeTime > BUTTON_HOLD_TIME_TO_SET_WCS) {
+                setState(IDLE);
+            }
+            break;
+
+    }
+
+    if (passThrough.processIncoming()) {
+        passThrough.processOutgoing();
+    }
+    previousAxis = pendant.getAxis();
+    previousXSwitch = pendant.getXSwitch();
 }
 
 // End

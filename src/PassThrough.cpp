@@ -1,118 +1,149 @@
 #include "PassThrough.h"
+#include "GCodeSerial.h"
 
-// Store character and add to checksum. If no room, we will discover that when we try to append the newline, so no need to record overflow here.
-void PassThrough::StoreAndAddToChecksum(char c)
-{
-  actualChecksum ^= c;
-  if (count < sizeof(buffer)/sizeof(buffer[0]))
-  {
-    buffer[count++] = c;
-  }
+void PassThrough::add(char c) {
+    if (dataLength < PASSTHROUGH_BUFFER_SIZE) {
+        rxBuffer[dataLength++] = c;
+    } else {
+        overflowed = true;
+    }
 }
 
-// Get the command and reset the state
-const char *PassThrough::GetCommand()
-{
-  state = State::waitingForStart;
-  return buffer;
+bool PassThrough::processOutgoing() {
+    uint16_t length = getDataLength();
+
+    if (length > 0 && output.isTxBufferEmpty()) {
+        char *buffer = rxBuffer;
+        // removing leading spaces
+        while (*buffer == ' ' && length > 0) {
+            ++buffer;
+            length--;
+        }
+        output.write(buffer, length);
+        output.println();
+        resetState();
+        return true;
+
+    } else {
+        return false;
+    }
 }
 
-// Check for new data, return 0 if no command available, else length of the command
-unsigned int PassThrough::Check(HardwareSerial& serial)
-{
-  while (state != State::haveCommand && serial.available() != 0)
-  {
-#if defined(__AVR_ATmega32U4__)     // Arduino Micro, Pro Micro or Leonardo
-    RXLED0;                         // turn on receive LED
-#endif
-    const char c = serial.read();
-#if defined(__AVR_ATmega32U4__)     // Arduino Micro, Pro Micro or Leonardo
-    if (c == '\r' || c == '\n')
-    {
-      RXLED1;                       // turn off receive LED
-    }
-    else
-    {
-      RXLED0;                       // turn on receive LED
-    }
-#endif
-    switch (state)
-    {
-      case State::waitingForStart:
-        if (c == 'N')
-        {
-          state = State::receivingLineNumber;
-          actualChecksum = c;
-          count = 0;
-        }
-        break;
+bool PassThrough::processIncoming() {
+    char c = '\0';
+    static uint8_t actualChecksum = 0;
+    static uint8_t receivedChecksum = 0;
+    bool readNextChar = true;
 
-      case State::receivingLineNumber:
-        if (c >= '0' && c <= '9')
-        {
-          StoreAndAddToChecksum(c);
-          break;
+    do {
+        if (readNextChar) {
+            c = input.read();
+            if (c == -1) {
+                break;
+            }
         }
-        state = State::receivingCommand;
-        //__attribute__ ((fallthrough));
-      case State::receivingCommand:
-        if (c == '*')
-        {
-          state = State::receivingChecksum;
-          receivedChecksum = 0;
-          break;
-        }
-        if (c == '\n' || c == '\r')
-        {
-          state = State::waitingForStart;
-          break;
-        }
-        if (c == '"')
-        {
-          state = State::receivingQuotedString;
-        }
-        StoreAndAddToChecksum(c);
-        break;
+        readNextChar = true;
 
-      case State::receivingQuotedString:
-        if (c == '\n' || c == '\r')
-        {
-          state = State::waitingForStart;
-          break;
-        }
-        if (c == '"')
-        {
-          state = State::receivingCommand;
-        }
-        StoreAndAddToChecksum(c);
-        break;
+        switch (state) {
+            case State::waitingForStart:
+                if (c == 'N') {
+                    actualChecksum = c;
+                    state = State::receivingLineNumber;
+                }
+                break;
 
-      case State::receivingChecksum:
-        if (c == '\n' || c == '\r')
-        {
-          if (count == sizeof(buffer)/sizeof(buffer[0]))    // if buffer too small for the command
-          {
-            state = State::waitingForStart;
-            break;
-          }
-          buffer[count++] = '\n';
-          state = (receivedChecksum == actualChecksum) ? State::haveCommand : State::waitingForStart;
-        }
-        else if (c >= '0' && c <= '9')
-        {
-          receivedChecksum = (10 * receivedChecksum) + (c - '0');
-        }
-        else
-        {
-          state = State::waitingForStart;
-        }
-        break;
+            case State::receivingLineNumber:
+                if (c >= '0' && c <= '9') {
+                    actualChecksum ^= c;
+                } else {
+                    readNextChar = false;
+                    state = State::receivingCommand;
+                }
+                break;
 
-      default:
-        break;
-    }
-  }
-  return (state == State::haveCommand) ? count : 0;
+            case State::receivingCommand:
+                if (c == '*') {
+                    state = State::receivingChecksum;
+                    receivedChecksum = 0;
+                    break;
+                }
+                if (c == '\n' || c == '\r') {
+                    resetState();
+                    break;
+                }
+                if (c == '"') {
+                    state = State::receivingQuotedString;
+                }
+                add(c);
+                actualChecksum ^= c;
+                break;
+
+            case State::receivingQuotedString:
+                if (c == '\n' || c == '\r') {
+                    resetState();
+                    break;
+                }
+                if (c == '"') {
+                    state = State::receivingCommand;
+                }
+                add(c);
+                actualChecksum ^= c;
+                break;
+
+            case State::receivingChecksum:
+                if (c == '\n' || c == '\r') {
+                    if (receivedChecksum == actualChecksum) {
+                        if (dataLength > 0) {
+                            state = State::haveCommand;
+                        } else {
+                            resetState();
+                        }
+
+                    } else {
+//                        output.println("CRC err");
+                        resetState();
+                    }
+
+                } else if (c >= '0' && c <= '9') {
+                    receivedChecksum = (10 * receivedChecksum) + (c - '0');
+                } else {
+                    resetState();
+                }
+                break;
+
+            default:
+                break;
+        }
+    } while (readNextChar || state != State::haveCommand);
+    return state == State::haveCommand;
+}
+
+const bool PassThrough::isOverflowed() {
+    return overflowed;
+}
+
+void PassThrough::resetState() {
+    overflowed = false;
+    dataLength = 0;
+    state = State::waitingForStart;
+}
+
+void PassThrough::discard() {
+    processIncoming();
+    resetState();
+}
+
+uint16_t PassThrough::getDataLength() const {
+    return state == State::haveCommand ? dataLength : 0;
+}
+
+bool PassThrough::isAvailableForSend() const {
+    return state == State::haveCommand;
+}
+
+
+PassThrough::PassThrough(HardwareSerial &inSerial, GCodeSerial &outSerial) : input(inSerial), output(outSerial) {
+    resetState();
 }
 
 // End

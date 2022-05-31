@@ -12,10 +12,12 @@ void RotaryEncoder::poll() {
              +1, +2, 0, -1,   // position 1 = 10 to 01, assume it was a bounce and should be 10 -> 00 -> 01
              0, -1, +1, 0     // position 0 = 11 to 10, can't really do anything
             };
+    noInterrupts();
     const unsigned int t = readState();
     const int movement = tbl[(state << 2) | t];
     change += movement;
     state = t;
+    interrupts();
 }
 
 int RotaryEncoder::getChange() {
@@ -37,8 +39,17 @@ RotaryEncoder::RotaryEncoder(int p0, int p1, int pulsesPerClick) :
         state(0), pin0(p0), pin1(p1), ppc(pulsesPerClick), change(0) {
     pinMode(pin0, INPUT_PULLUP);
     pinMode(pin1, INPUT_PULLUP);
-//    delay(10);                  // ensure we read the initial state correctly
-//    state = readState();
+}
+
+void RotaryEncoder::reset() {
+    noInterrupts();
+    state = readState();
+    change = 0;
+    interrupts();
+}
+
+uint8_t RotaryEncoder::readState() {
+    return (digitalRead(pin0) ? 1u : 0u) | (digitalRead(pin1) ? 2u : 0u);
 }
 
 // End

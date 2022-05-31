@@ -46,6 +46,8 @@ public:
 
     int readEncoderValue();
 
+    void resetEncoder();
+
     void poll();
 
     bool isButtonPressed();
@@ -63,7 +65,11 @@ private:
     int axis = OFF;
 
     const int xSwitchPins[3] = {PIN_X1, PIN_X10, PIN_X100};
-    const int xFeedFactor[4] = {0, 1, 10, 100};
+    // 0 - off (or not connected)
+    // 100 - means: (encoder value in cents) x 100
+    // 10 - means: (encoder value in cents) x 10
+    // 1 - means: (encoder value in cents) x 1
+    const int xFeedFactor[4] = {0, 100, 10, 1};
     int xSwitch = UNDEFINED;
 
     bool pressedEarlier = false;

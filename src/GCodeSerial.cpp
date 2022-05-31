@@ -3,6 +3,7 @@
 void GCodeSerial::begin(unsigned long baud) {
     serial.begin(baud);
     lineNumber = 0;
+    checksum = 0;
     emptyLine = true;
     txBufferSize = serial.availableForWrite();
 }

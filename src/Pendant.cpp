@@ -102,6 +102,10 @@ int Pendant::readEncoderValue() {
     return encoder.getChange();
 }
 
+void Pendant::resetEncoder() {
+    encoder.reset();
+}
+
 void Pendant::poll() {
     pollTime = millis();
 

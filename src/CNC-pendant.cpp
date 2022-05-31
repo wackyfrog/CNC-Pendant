@@ -128,10 +128,12 @@ GCodeSerial output(UartSerial);
 
 PassThrough passThrough(UartSerial, output);
 
+void(* rebootPendant) (void) = 0;
 
 int axisWhenButtonPressed = Pendant::Axis::OFF;
+int selectedAxis = Pendant::Axis::OFF;
 
-int acknowelegementResult = 0;
+int acknowledgementResult = 0;
 
 int previousAxis = Pendant::Axis::OFF;
 int previousXSwitch = Pendant::XSwitch::UNDEFINED;
@@ -162,6 +164,15 @@ void setState(State newState) {
         return;
     }
 
+    if (state == MOVEMENT) {
+        output.print(CommandNormalMode);
+        output.println();
+        if (selectedAxis != Pendant::Axis::OFF) {
+            output.print(CommandsAxisDeselect[selectedAxis - 1]);
+            output.println();
+        }
+    }
+
     switch (newState) {
         case IDLE:
 //            Serial1.println(F("[MODE][IDLE]"));
@@ -179,6 +190,16 @@ void setState(State newState) {
 //            Serial1.println(F("[MODE][MOVEMENT]"));
             buttonLed.setMode(Led::On);
             previousAxis = Pendant::Axis::OFF;
+
+            output.print(CommandPendantMode);
+            output.println();
+
+            selectedAxis = pendant.getAxis();
+            if (selectedAxis != Pendant::Axis::OFF) {
+                output.print(CommandsAxisSelect[selectedAxis - 1]);
+                output.println();
+            }
+            output.println();
             break;
 
         case MOVEMENT_WCS:
@@ -190,7 +211,7 @@ void setState(State newState) {
             stateLed.setColorWhite(LED_MAX_VAL);
             buttonLed.on();
             stateLed.on();
-            acknowelegementResult = 0;
+            acknowledgementResult = 0;
             break;
 
         case ACKNOWLEDGE_CONFIRM:
@@ -230,7 +251,7 @@ bool onButtonRelease(const uint32_t time) {
             if (axisWhenButtonPressed == Pendant::Axis::OFF
                 /*&& pendant.getXSwitch() == Pendant::XSwitch::X100*/
                 && pendant.getAxis() != Pendant::Axis::OFF) {
-                output.print(WCSResetCommands[pendant.getAxis() - 1]);
+                output.print(CommandsClearWCS[pendant.getAxis() - 1]);
                 output.println();
 
                 stateLed.setColorHSV(HUE_AZURE, SATURATION_MAX, LED_MAX_VAL);
@@ -267,12 +288,12 @@ bool onButtonRelease(const uint32_t time) {
     return true;
 }
 
+static uint32_t whenLastCommandSent = 0;
 bool processMovement() {
-    static uint32_t whenLastCommandSent = 0;
     const uint32_t now = millis();
 
     if (pendant.getAxis() == Pendant::Axis::OFF || pendant.getFeedFactor() == 0) {
-        pendant.readEncoderValue();
+        pendant.resetEncoder();
         return false;
     }
 
@@ -303,19 +324,17 @@ void processAcknowledgement() {
     if (value == 0) {
         return;
     }
-
-
-    acknowelegementResult += value;
-    if (acknowelegementResult > ackThreshold) {
+    acknowledgementResult += value;
+    if (acknowledgementResult > ackThreshold) {
         setState(ACKNOWLEDGE_CONFIRM);
         return;
 
-    } else if (acknowelegementResult < -ackThreshold) {
+    } else if (acknowledgementResult < -ackThreshold) {
         setState(ACKNOWLEDGE_CANCEL);
         return;
     }
 
-    int hue = HUE_YELLOW + acknowelegementResult * 2;
+    int hue = HUE_YELLOW + acknowledgementResult * 2;
     if (hue > HUE_GREEN) {
         hue = HUE_GREEN;
     } else if (hue < HUE_RED) {
@@ -324,7 +343,7 @@ void processAcknowledgement() {
         stateLed.on();
     }
 
-    stateLed.setColorHSV(hue, min(abs(acknowelegementResult) * 8, 100), LED_MAX_VAL);
+    stateLed.setColorHSV(hue, min(abs(acknowledgementResult) * 8, 100), LED_MAX_VAL);
     stateLed.update();
     stateLastChangeTime = millis();
 }
@@ -349,6 +368,8 @@ void setup() {
 
     pendant.onButtonPress = onButtonPress;
     pendant.onButtonRelease = onButtonRelease;
+    pendant.resetEncoder();
+    pendant.poll();
 }
 
 void onButtonPressing() {
@@ -364,12 +385,18 @@ void onButtonPressing() {
                 break;
             }
 
-            output.print(WCSSetCommands[axisWhenButtonPressed - 1]);
+            output.print(CommandsSetWcs[axisWhenButtonPressed - 1]);
             output.println();
 
             stateLed.setColorHSV(axisColor[pendant.getAxis() - 1], SATURATION_MAX, LED_MAX_VAL);
             stateLed.setMode(Led::FastBlink);
             setState(TIMEOUT_AFTER_COMMAND);
+            break;
+
+        case IDLE:
+            if (pendant.getButtonPressingTime() > 10000) {
+                rebootPendant();
+            }
             break;
 
         default:
@@ -391,7 +418,7 @@ void loop() {
     uint32_t now = millis();
     if (pendant.isButtonPressed()) {
         onButtonPressing();
-        pendant.readEncoderValue();
+        pendant.resetEncoder();
         passThrough.discard();
         return;
     }
@@ -403,17 +430,19 @@ void loop() {
     switch (state) {
         case INIT:
             setState(IDLE);
+            output.print(CommandPendantStartup);
+            output.println();
             return;
 
         case IDLE:
             if (pendant.getAxis() != Pendant::Axis::OFF) {
                 setState(IDLE_MOVEMENT);
             }
-            pendant.readEncoderValue();
+            pendant.resetEncoder();
             break;
 
         case IDLE_MOVEMENT:
-            pendant.readEncoderValue();
+            pendant.resetEncoder();
             break;
 
         case MOVEMENT:
@@ -452,7 +481,7 @@ void loop() {
             // fallthrough
         case TIMEOUT_AFTER_COMMAND:
             buttonLed.off();
-            pendant.readEncoderValue();
+            pendant.resetEncoder();
             if (now - stateLastChangeTime > BUTTON_HOLD_TIME_TO_SET_WCS) {
                 setState(IDLE);
             }

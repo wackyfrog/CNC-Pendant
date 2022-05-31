@@ -7,7 +7,7 @@
 
 #include <Arduino.h>
 
-#define VERSION "CNCPendant v1.0RC for Duet3D"
+#define VERSION "CNCPendant v1.1RC for Duet3D"
 
 // Serial port configuration
 #define BAUD_RATE 57600
@@ -39,8 +39,8 @@
 #define BUTTON_PRESSED LOW
 #define PIN_BUTTON 9
 
-// 15 sec
-#define MOVEMENT_IDLE_TIME ( 10 * 1000 )
+// 5 sec
+#define MOVEMENT_IDLE_TIME ( 5 * 1000 )
 
 // 5 sec
 #define ACKNOWLEDGE_IDLE_TIME ( 5 * 1000 )
@@ -90,22 +90,36 @@ const char *const MoveCommands[] = {
         "G91 G0 F6000 X",     // X axis
         "G91 G0 F6000 Y",     // Y axis
         "G91 G0 F600  Z",      // Z axis
-        "G91 G0 F6000 U"
+        "M98 P\"pendant/speed-factor.g\" F",     // U axis - speed factor
 };
 
 // Table of commands we send for set WCS (Work Coordinate System), one entry for each axis
-const char *const WCSSetCommands[] = {
-        "M98 P\"pendant/set-wcs-x.g\" ",     // X axis
-        "M98 P\"pendant/set-wcs-y.g\" ",     // Y axis
-        "M98 P\"pendant/set-wcs-z.g\" ",     // Z axis
-        "M98 P\"pendant/set-wcs-u.g\" ",     // U axis
+const char *const CommandsSetWcs[] = {
+        "M98 P\"pendant/x-set-0.g\" ",     // X axis
+        "M98 P\"pendant/y-set-0.g\" ",     // Y axis
+        "M98 P\"pendant/z-set-0.g\" ",     // Z axis
+        "M98 P\"pendant/u-set-0.g\" ",     // U axis
 };
 
-const char *const WCSResetCommands[] = {
-        "M98 P\"pendant/reset-wcs-x.g\" ",     // X axis
-        "M98 P\"pendant/reset-wcs-y.g\" ",     // Y axis
-        "M98 P\"pendant/reset-wcs-z.g\" ",     // Z axis
-        "M98 P\"pendant/reset-wcs-u.g\" ",     // U axis
+const char *const CommandsAxisSelect[] = {
+        "M98 P\"pendant/x-select.g\" ",     // X axis
+        "M98 P\"pendant/y-select.g\" ",     // Y axis
+        "M98 P\"pendant/z-select.g\" ",     // Z axis
+        "M98 P\"pendant/u-select.g\" ",     // U axis
+};
+
+const char *const CommandsAxisDeselect[] = {
+        "M98 P\"pendant/x-deselect.g\" ",     // X axis
+        "M98 P\"pendant/y-deselect.g\" ",     // Y axis
+        "M98 P\"pendant/z-deselect.g\" ",     // Z axis
+        "M98 P\"pendant/u-deselect.g\" ",     // U axis
+};
+
+const char *const CommandsClearWCS[] = {
+        "M98 P\"pendant/x-clear-0.g\" ",     // X axis
+        "M98 P\"pendant/y-clear-0.g\" ",     // Y axis
+        "M98 P\"pendant/z-clear-0.g\" ",     // Z axis
+        "M98 P\"pendant/u-clear-0.g\" ",     // U axis
 };
 
 // The interval (in milliseconds) between sending repeating pause commands.
@@ -114,4 +128,8 @@ const char *const WCSResetCommands[] = {
 const char *const CommandConfirm = "M98 P\"pendant/cmd-confirm.g\" ";
 const char *const CommandCancel = "M98 P\"pendant/cmd-cancel.g\" ";
 
+const char *const CommandNormalMode = "M98 P\"pendant/normal-mode.g\" ";
+const char *const CommandPendantMode = "M98 P\"pendant/pendant-mode.g\" ";
+
+const char *const CommandPendantStartup = "M98 P\"pendant/startup.g\" ";
 #endif //CNC_PENDANT_CONFIG_H
